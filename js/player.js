@@ -1,22 +1,20 @@
 (function () {
   "use strict";
 
-  const PLAYER_CSV_URL = ""; 
-  const PLAYLIST_URL_FIXA = "https://soundcloud.com/lucasps0075/sets/playlist-dancehall?si=c9e89c8162e24e498d08c7c702b8e6be&utm_source=clipboard&utm_medium=text&utm_campaign=social_sharing";
+  const PLAYER_CSV_URL = "";      // <- link CSV publicado da aba "player"
+  const PLAYLIST_URL_FIXA = "https://soundcloud.com/lucasps0075/sets/playlist-dancehall?si=c9e89c8162e24e498d08c7c702b8e6be&utm_source=clipboard&utm_medium=text&utm_campaign=social_sharing";   // <- opcional: link fixo da playlist (ignora a planilha)
+  const SHOW_TRACK_LABEL = true;  // false = não mostra o aviso de faixa (erros continuam aparecendo)
 
   const SC_API_SRC = "https://w.soundcloud.com/player/api.js";
-  const LOAD_TIMEOUT_MS = 12000; 
-  const NUDGE_MS = 1800;
+  const LOAD_TIMEOUT_MS = 12000;  // tempo máximo esperando o widget carregar
+  const NUDGE_MS = 1800;          // se não começar a tocar nesse tempo, pede outro toque
+  const DOUBLE_MS = 320;          // janela do clique duplo
+  const TOAST_MS = 3800;          // duração do aviso de faixa
 
   const btn = document.getElementById("sound-btn");
   if (!btn) return;
 
   // ---------- utilidades ----------
-  const fmt = (ms) => {
-    const s = Math.max(0, Math.floor(ms / 1000));
-    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  };
-
   function parseCsv(text) {
     const rows = [];
     let row = [], field = "", inQuotes = false;
@@ -70,168 +68,106 @@
   }
 
   // ---------- estado ----------
-  const ICON = {
-    play: '<svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg>',
-    pause: '<svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>',
-    prev: '<svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>',
-    next: '<svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>',
-    list: '<svg viewBox="0 0 24 24"><path d="M4 6h16v2H4zM4 11h16v2H4zM4 16h10v2H4z"/></svg>'
-  };
-
   let playlistUrl = "";
-  let root = null, els = {};
   let widget = null, iframe = null, pending = null;
-  let sounds = [], cur = 0, posMs = 0;
-  let playing = false, wantPlay = false, seeking = false;
+  let sounds = [], cur = 0, lastAnnounced = -1;
+  let playing = false, wantPlay = false;
   let state = "idle"; // idle | loading | ready | error
-  let notice = "", nudgeTimer = null;
+  let nudgeTimer = null, lastClick = 0;
+  let toast = null, toastTimer = null;
 
-  // ---------- interface ----------
-  function buildPlayer() {
-    const el = document.createElement("div");
-    el.className = "player";
-    el.setAttribute("role", "region");
-    el.setAttribute("aria-label", "Sound system da Fyah");
-    el.innerHTML =
-      '<div class="panel"><div class="panel-in">' +
-        '<h3>Playlist via SoundCloud · <a class="sc-link" target="_blank" rel="noopener">abrir no SoundCloud</a></h3>' +
-        '<div class="list"></div>' +
-      '</div></div>' +
-      '<div class="row">' +
-        '<div class="disc" aria-hidden="true"></div>' +
-        '<div class="meta">' +
-          '<b><span class="eq" aria-hidden="true"><i></i><i></i><i></i></span><span class="title"></span></b>' +
-          '<span class="artist"></span>' +
-        '</div>' +
-        '<div class="ctrl">' +
-          '<button type="button" class="ic prev" aria-label="Faixa anterior">' + ICON.prev + '</button>' +
-          '<button type="button" class="ic main play" aria-label="Tocar"></button>' +
-          '<button type="button" class="ic next" aria-label="Próxima faixa">' + ICON.next + '</button>' +
-          '<button type="button" class="ic toggle" aria-label="Abrir lista de faixas" aria-expanded="false">' + ICON.list + '</button>' +
-        '</div>' +
-      '</div>' +
-      '<div class="bar">' +
-        '<time class="cur">0:00</time>' +
-        '<div class="seek" role="slider" tabindex="0" aria-label="Progresso da faixa" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div><i></i></div></div>' +
-        '<time class="dur">0:00</time>' +
-      '</div>' +
-      '<div class="err"><span class="err-msg"></span><button type="button" class="retry">Tentar de novo</button></div>';
-    document.body.appendChild(el);
-
-    const q = (s) => el.querySelector(s);
-    els = {
-      title: q(".title"), artist: q(".artist"), cur: q(".cur"), dur: q(".dur"),
-      fill: q(".seek i"), seek: q(".seek"), play: q(".play"), prev: q(".prev"),
-      next: q(".next"), toggle: q(".toggle"), list: q(".list"),
-      retry: q(".retry"), errMsg: q(".err-msg"), scLink: q(".sc-link")
-    };
-    els.scLink.href = playlistUrl;
-    return el;
-  }
-
-  function paintProgress() {
-    const dur = (sounds[cur] && sounds[cur].duration) || 0;
-    const pct = dur ? Math.min(100, (posMs / dur) * 100) : 0;
-    els.cur.textContent = fmt(posMs);
-    els.fill.style.width = pct + "%";
-    els.seek.setAttribute("aria-valuenow", Math.round(pct));
-  }
-
+  // ---------- botão ----------
   function ui() {
-    const s = sounds[cur] || {};
-    const loading = state === "loading";
-    root.classList.toggle("playing", playing);
+    const loading = state === "loading" && wantPlay;
     btn.classList.toggle("playing", playing);
-
-    els.title.textContent = loading ? "Carregando playlist..." : (s.title || "Sound system");
-    els.artist.textContent = notice ||
-      (loading || !s.artist ? "via SoundCloud" : s.artist + " · via SoundCloud");
-    root.style.setProperty("--cover",
-      !loading && s.cover ? 'url("' + s.cover.replace(/"/g, "%22") + '")' : "var(--p-yellow)");
-
-    els.dur.textContent = fmt(s.duration || 0);
-    paintProgress();
-    els.play.innerHTML = playing ? ICON.pause : ICON.play;
-    els.play.setAttribute("aria-label", playing ? "Pausar" : "Tocar");
-    els.list.querySelectorAll(".track").forEach((t, i) => t.classList.toggle("on", i === cur));
-  }
-
-  function renderList() {
-    els.list.textContent = "";
-    sounds.forEach((s, i) => {
-      // textContent de propósito: título e artista vêm de terceiros
-      const b = document.createElement("button");
-      b.type = "button"; b.className = "track"; b.dataset.i = i;
-      const n = document.createElement("span"); n.className = "n"; n.textContent = i + 1;
-      const tt = document.createElement("span"); tt.className = "tt";
-      const t = document.createElement("b"); t.textContent = s.title;
-      const a = document.createElement("span"); a.textContent = s.artist;
-      tt.append(t, a);
-      const d = document.createElement("span"); d.className = "du"; d.textContent = fmt(s.duration);
-      b.append(n, tt, d);
-      els.list.appendChild(b);
-    });
-  }
-
-  function setBar(on) {
-    root.classList.toggle("show", on);
-    document.body.classList.toggle("player-on", on);
-    btn.classList.add("seen");
-    btn.setAttribute("aria-pressed", on);
-    const label = on ? "Desligar o sound system" : "Ligar o sound system";
+    btn.classList.toggle("loading", loading);
+    btn.setAttribute("aria-pressed", String(playing));
+    const label = playing ? "Pausar o sound system" : "Ligar o sound system";
     btn.setAttribute("aria-label", label);
-    btn.title = label;
-    if (!on) {
-      root.classList.remove("open");
-      els.toggle.classList.remove("on");
-      els.toggle.setAttribute("aria-expanded", "false");
+    btn.title = playing ? label + " (clique duas vezes pra pular a faixa)" : label;
+  }
+
+  // ---------- aviso rápido ----------
+  function hideToastLater(ms) {
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { if (toast) toast.classList.remove("on"); }, ms);
+  }
+
+  function showToast(opts, ms) {
+    if (!toast) {
+      toast = document.createElement("div");
+      toast.className = "sound-toast";
+      toast.setAttribute("role", "status");
+      toast.setAttribute("aria-live", "polite");
+      toast.addEventListener("pointerenter", () => clearTimeout(toastTimer));
+      toast.addEventListener("pointerleave", () => hideToastLater(1500));
+      document.body.appendChild(toast);
     }
+    // textContent de propósito: título e artista vêm de terceiros
+    toast.textContent = "";
+    const main = document.createElement(opts.href ? "a" : "b");
+    main.className = "st-main";
+    main.textContent = opts.main;
+    if (opts.href) { main.href = opts.href; main.target = "_blank"; main.rel = "noopener"; }
+    toast.appendChild(main);
+    if (opts.sub) {
+      const sub = document.createElement("span");
+      sub.className = "st-sub";
+      sub.textContent = opts.sub;
+      toast.appendChild(sub);
+    }
+    const r = btn.getBoundingClientRect();
+    toast.style.top = (r.bottom + 10) + "px";
+    toast.style.right = Math.max(8, window.innerWidth - r.right) + "px";
+    toast.classList.add("on");
+    hideToastLater(ms || TOAST_MS);
+  }
+
+  function announce(i) {
+    const s = sounds[i];
+    if (!s || !SHOW_TRACK_LABEL) return;
+    showToast({
+      main: s.title,
+      sub: (s.artist ? s.artist + " · " : "") + "via SoundCloud",
+      href: s.url
+    }, TOAST_MS);
   }
 
   function showError(msg) {
     state = "error"; playing = false; wantPlay = false;
     clearTimeout(nudgeTimer);
-    els.errMsg.textContent = msg || "Sound system fora do ar por enquanto.";
-    root.classList.add("error");
     ui();
+    showToast({ main: msg || "Sound system fora do ar por enquanto.", sub: "Toque no ícone pra tentar de novo" }, 6000);
   }
 
   // ---------- widget do SoundCloud ----------
   function normalize(list) {
-    return (list || []).map((s) => {
-      const cover = (s && (s.artwork_url || (s.user && s.user.avatar_url))) || "";
-      return {
-        title: s && s.title ? String(s.title) : "Faixa sem título",
-        artist: s && s.user && s.user.username ? String(s.user.username) : "",
-        duration: Number(s && s.duration) || 0,
-        cover: cover ? String(cover).replace("-large.", "-t200x200.") : ""
-      };
-    });
+    return (list || []).map((s) => ({
+      title: s && s.title ? String(s.title) : "Faixa sem título",
+      artist: s && s.user && s.user.username ? String(s.user.username) : "",
+      url: s && isSoundCloudUrl(s.permalink_url) ? String(s.permalink_url) : ""
+    }));
   }
 
   function syncIndex() {
     if (!widget) return;
     widget.getCurrentSoundIndex((i) => {
-      if (typeof i === "number" && i !== cur) { cur = i; posMs = 0; }
-      ui();
+      if (typeof i !== "number") return;
+      cur = i;
+      if (i !== lastAnnounced) { lastAnnounced = i; announce(i); }
     });
   }
 
   function bindEvents(w) {
     const E = window.SC.Widget.Events;
     w.bind(E.PLAY, () => {
-      playing = true; wantPlay = false; notice = "";
+      playing = true; wantPlay = false;
       clearTimeout(nudgeTimer);
       syncIndex(); ui();
     });
     w.bind(E.PAUSE, () => { playing = false; ui(); });
     // ao fim de uma faixa a playlist segue sozinha (o PLAY dispara de novo)
     w.bind(E.FINISH, () => { playing = false; ui(); });
-    w.bind(E.PLAY_PROGRESS, (d) => {
-      if (seeking) return;
-      posMs = (d && d.currentPosition) || 0;
-      paintProgress();
-    });
     w.bind(E.ERROR, () => showError("O SoundCloud não conseguiu tocar essa playlist."));
   }
 
@@ -257,9 +193,8 @@
     sounds = normalize(list);
     if (!sounds.length) throw new Error("vazia");
 
-    widget = w; cur = 0; posMs = 0;
+    widget = w; cur = 0; lastAnnounced = -1;
     bindEvents(w);
-    renderList();
   }
 
   function ensureWidget() {
@@ -270,26 +205,26 @@
 
   function resetWidget() {
     if (iframe) { iframe.remove(); iframe = null; }
-    widget = null; sounds = []; cur = 0; posMs = 0;
-    playing = false; state = "idle"; notice = "";
-    root.classList.remove("error");
+    widget = null; sounds = []; cur = 0; lastAnnounced = -1;
+    playing = false; state = "idle";
   }
 
-  // ---------- fluxo ligar / desligar ----------
+  // ---------- ações ----------
   function startPlayback() {
+    wantPlay = true;
     widget.play();
     clearTimeout(nudgeTimer);
+    // Alguns navegadores de celular (principalmente iPhone) barram o play iniciado
+    // depois do carregamento. Se não começar, pedimos outro toque no ícone.
     nudgeTimer = setTimeout(() => {
       if (!playing && wantPlay && state === "ready") {
-        notice = "Toque em play pra começar";
-        ui();
+        showToast({ main: "Toque no ícone de novo pra começar" }, 5000);
       }
     }, NUDGE_MS);
   }
 
   async function turnOn() {
     if (state === "error") resetWidget();
-    setBar(true);
     wantPlay = true;
     if (!widget) {
       state = "loading"; ui();
@@ -303,72 +238,29 @@
         return;
       }
       state = "ready";
-      if (!root.classList.contains("show")) { ui(); return; } // desligou durante o carregamento
+      if (!wantPlay) { ui(); return; } // a pessoa desistiu durante o carregamento
     }
     ui();
     startPlayback();
   }
 
-  function turnOff() {
-    wantPlay = false; notice = "";
-    clearTimeout(nudgeTimer);
-    if (widget && playing) widget.pause();
-    setBar(false);
+  function toggle() {
+    btn.classList.add("seen");
+    if (state === "loading") { wantPlay = !wantPlay; ui(); return; }
+    if (!widget) { turnOn(); return; }
+    if (playing) {
+      wantPlay = false;
+      clearTimeout(nudgeTimer);
+      widget.pause();
+    } else {
+      startPlayback();
+    }
   }
 
-  // ---------- eventos da interface ----------
-  function wire() {
-    btn.addEventListener("click", () => (root.classList.contains("show") ? turnOff() : turnOn()));
-
-    els.play.addEventListener("click", () => {
-      if (!widget) return;
-      if (playing) widget.pause();
-      else { notice = ""; widget.play(); }
-      ui();
-    });
-    els.next.addEventListener("click", () => { if (widget) widget.next(); });
-    els.prev.addEventListener("click", () => {
-      if (!widget) return;
-      if (posMs > 3000) widget.seekTo(0); else widget.prev();
-    });
-    els.toggle.addEventListener("click", () => {
-      const open = root.classList.toggle("open");
-      els.toggle.classList.toggle("on", open);
-      els.toggle.setAttribute("aria-expanded", open);
-    });
-    els.list.addEventListener("click", (e) => {
-      const b = e.target.closest(".track");
-      if (!b || !widget) return;
-      widget.skip(Number(b.dataset.i));
-      widget.play();
-    });
-    els.retry.addEventListener("click", () => { resetWidget(); turnOn(); });
-
-    const seekFrom = (e) => {
-      const r = els.seek.getBoundingClientRect();
-      const f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-      posMs = f * ((sounds[cur] && sounds[cur].duration) || 0);
-      paintProgress();
-    };
-    els.seek.addEventListener("pointerdown", (e) => {
-      if (!widget) return;
-      seeking = true;
-      els.seek.setPointerCapture(e.pointerId);
-      seekFrom(e);
-    });
-    els.seek.addEventListener("pointermove", (e) => { if (seeking) seekFrom(e); });
-    els.seek.addEventListener("pointerup", () => {
-      if (!seeking) return;
-      seeking = false;
-      widget.seekTo(posMs);
-    });
-    els.seek.addEventListener("pointercancel", () => { seeking = false; });
-    els.seek.addEventListener("keydown", (e) => {
-      if (!widget) return;
-      const d = (sounds[cur] && sounds[cur].duration) || 0;
-      if (e.key === "ArrowRight") widget.seekTo(Math.min(d, posMs + 5000));
-      if (e.key === "ArrowLeft") widget.seekTo(Math.max(0, posMs - 5000));
-    });
+  function skipNext() {
+    if (!widget) return;
+    if (cur >= sounds.length - 1) widget.skip(0); else widget.next();
+    widget.play();
   }
 
   // ---------- início ----------
@@ -380,8 +272,18 @@
       return;
     }
     playlistUrl = new URL(url).href;
-    root = buildPlayer();
-    wire();
+
+    btn.addEventListener("click", () => {
+      const now = performance.now();
+      const isDouble = now - lastClick < DOUBLE_MS;
+      lastClick = isDouble ? 0 : now;
+      if (isDouble) { skipNext(); return; } // segundo clique: pula (sem widget ainda, é ignorado)
+      toggle();
+    });
+    btn.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") { e.preventDefault(); skipNext(); }
+    });
+
     ui();
     btn.hidden = false;
   })();
