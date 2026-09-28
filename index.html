@@ -9,6 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="icon" type="image/png" href="assets/logo.png">
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/player.css">
 </head>
 <body>
 
@@ -22,6 +23,10 @@
     <a href="#agenda">Agenda</a>
     <a href="#visite">Visite</a>
   </nav>
+  <button class="sound" id="sound-btn" type="button" hidden aria-pressed="false" aria-label="Ligar o sound system" title="Ligar o sound system">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+  <span class="eqi" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+</button>
 </header>
 
 <section class="hero">
@@ -104,5 +109,6 @@
 
 <script src="js/agenda.js"></script>
 <script src="js/smoke.js"></script>
+<script src="js/player.js"></script>
 </body>
 </html>
